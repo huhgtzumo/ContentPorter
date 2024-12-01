@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { createReadStream } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { broadcastProgress } from './websocket';
 
 const execAsync = promisify(exec);
 
@@ -75,19 +76,45 @@ export const downloadVideo = async (url: string, quality: string, res: Response)
       throw new Error('找不到指定品質的影片');
     }
 
-    // 使用臨時檔案路徑
     const tempFilePath = join(tmpdir(), `x-video-${Date.now()}.mp4`);
-    
     console.log('開始下載影片...');
-    // 使用 yt-dlp 直接下載指定格式
-    await execAsync(`yt-dlp -f ${selectedVideo.formatId} "${url}" -o "${tempFilePath}"`);
-    
-    // 創建讀取流
+
+    // 使用 yt-dlp 下載，並監聽進度
+    await new Promise((resolve, reject) => {
+      const process = exec(
+        `yt-dlp -f ${selectedVideo.formatId} "${url}" -o "${tempFilePath}" --newline`,
+        { maxBuffer: 1024 * 1024 * 100 }
+      );
+
+      process.stdout?.on('data', (data: string) => {
+        const downloadMatch = data.match(/\[download\]\s+(\d+\.?\d*)%\s+of\s+~?\s*(\d+\.?\d*)([KMG])iB/);
+        if (downloadMatch) {
+          const [, percent, size, unit] = downloadMatch;
+          const multiplier = unit === 'G' ? 1024 * 1024 * 1024 : unit === 'M' ? 1024 * 1024 : 1024;
+          const totalBytes = parseFloat(size) * multiplier;
+          const downloadedBytes = totalBytes * (parseFloat(percent) / 100);
+
+          const progress = {
+            progress: parseFloat(percent),
+            downloadedSize: Math.floor(downloadedBytes),
+            totalSize: Math.floor(totalBytes)
+          };
+
+          console.log('下載進度:', progress);
+          broadcastProgress(progress);
+        }
+      });
+
+      process.on('exit', (code) => {
+        if (code === 0) resolve(null);
+        else reject(new Error(`下載失敗，退出碼: ${code}`));
+      });
+    });
+
+    // 返回文件流
     const fileStream = createReadStream(tempFilePath);
-    
-    // 設置清理函數
     fileStream.on('end', () => {
-      // 下載完成後刪除臨時檔案
+      // 清理臨時文件
       execAsync(`rm "${tempFilePath}"`);
     });
 
